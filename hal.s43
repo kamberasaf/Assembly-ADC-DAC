@@ -1,0 +1,160 @@
+#include "bsp.h" 
+
+              MODULE HAL
+              PUBLIC SysConfig,PBs_ISR,poll_delay
+              PUBLIC LCDConfig,LCD_CMD,LCDClear,LCDCursorTo1,LCDCursorTo17,
+              PUBLIC LCDCursorOff,LCDCursorOn,LCDCursorR,LCDCursorL,LCDPrintChar
+              PUBLIC LCDClear,ADC_Start,ADC_ISR
+              EXTERN GPIOconfig,ADCconfig,ADCLabconfig
+              EXTERN state,flag
+            
+              RSEG   CODE
+;--------------------------------------------------------------------
+;             System Configuration  
+;--------------------------------------------------------------------
+SysConfig     call #GPIOconfig
+              call #LCDConfig
+              call #ADCconfig
+              ;call #ADCLabconfig
+              ret
+;------------------------------------------------------------------------------------- 
+;            LCD congiguration 
+;-------------------------------------------------------------------------------------
+;-----------LCD initalization commands
+LCDConfig   bic.b #LCDRS, LCDCMDPort       ; clear RS
+            bic.b #LCDRW, LCDCMDPort       ; clear RW
+            bic.b #LCDE,  LCDCMDPort       ; clear E flag
+            clr R6                         ; clear R6 reserved for LCD_CMD
+            push #5250                     ;delay here 15msec
+            call #poll_delay
+;___________First write
+            mov.b #0x3F,  LCDDataPort     ; Data Byte = 0x3F
+            call #LCD_Strobe              ; strobe routine
+            push #1750                    ;delay here 5msec
+            call #poll_delay
+;___________Second write
+            mov.b #0x3F,  LCDDataPort     ; Data Byte = 0x3F
+            call #LCD_Strobe              ; strobe routine
+            push #70                
+            call #poll_delay              //delay here 200u-sec
+;___________Third write
+            mov.b #0x3F,  LCDDataPort     ; Data Byte = 0x3F
+            call #LCD_Strobe              ; strobe routine            
+            push.w #0x3C
+            call #LCD_CMD                 ; lcd_cmd #0x3C
+            call #LCDCursorOn             ; lcd_cmd #0x0F -- cursor on
+            call #LCDClear                ; lcd_cmd #0x01 -- LCD clear
+            push.w #0x06
+            call #LCD_CMD                 ; lcd_cmd #0x06
+            push.w #0x80
+            call #LCD_CMD                 ; lcd_cmd #0x80
+            call #LCDCursorTo1            ; lcd_cmd #0x02 -- back to start
+            call #LCDCursorOff            ; Turn cursor off - just for visuals
+            ret
+            
+;-----------LCD Strobe
+LCD_Strobe  bis.b #LCDE, LCDCMDPort        ; set E=1
+            nop
+            nop
+            bic.b #LCDE, LCDCMDPort        ; set E=0
+            ret
+
+;-----------LCD_CMD - receives COMMAND, returns void
+LCD_CMD     pop R7                        ; save return address
+            pop R6                        ; pop command to R6
+            push #1750                  
+            call #poll_delay              //delay here 5ms
+            mov.b R6, LCDDataPort          ; move command to CMD legs
+            call #LCD_Strobe              ; strobe routine  
+            push.w R7                     ; push back return address to TOS
+            ret
+
+;-----------LCD DRIVER COMMANDS - void functions
+LCDClear      push #0x01          ; Clear LCD
+              call #LCD_CMD
+              ret
+LCDCursorTo1  push #0x02          ; Move cursor to first sqaure TOP row
+              call #LCD_CMD
+              ret
+LCDCursorTo17 push.w #0xC0        ; Move cursor to first square BOTTOM row
+              call #LCD_CMD
+              ret
+LCDCursorOff  push.w #0x0C        ; Cursor visability = false
+              call #LCD_CMD
+              ret
+LCDCursorOn   push.w #0x0F        ; Cursor visability = true
+              call #LCD_CMD
+              ret
+LCDCursorR    push.w #0x14        ; Move cursor 1 block RIGHT
+              call #LCD_CMD
+              ret
+LCDCursorL    push.w #0x10        ; Move cursor 1 block LEFT
+              call #LCD_CMD
+              ret
+              
+;-----------LCD Write Char - receives ASCII returns void
+
+LCDPrintChar  pop R8                   ; save return address
+              pop R9                   ; save value to print
+              push   #1750              
+              call   #poll_delay        ; delay here 5ms
+              clr.b  LCDDataPort        ; clear previous digit on block
+              bis.b  #LCDRS, LCDCMDPort ; set RS = 1
+              mov.b  R9, LCDDataPort    ; Print value to the screen
+              call   #LCD_Strobe        ; strobe routine 
+              bic.b  #LCDRS, LCDCMDPort ; set RS = 0
+              push.w R8                 ; push return address to TOS
+              ret        
+
+;----------------------------------------------------------------------- 
+;            PORT1 Interrupt Service Routine
+;-----------------------------------------------------------------------
+PBs_ISR      push.w #debounceVal
+             call   #poll_delay    
+             bit.b  #PB0,PBsArrIntPend   ; check if PB0 is pushed
+             jnz    PB0sel 
+             bit.b  #PB1,PBsArrIntPend   ; check if PB1 is pushed
+             jnz    PB1sel
+             bit.b  #PB2,PBsArrIntPend
+             jnz    PB2sel
+             reti                        ; interrupt happened from another source
+             
+PB0sel       mov    #1,state 
+             jmp    WAKEUP
+PB1sel       mov    #2,state
+             jmp    WAKEUP
+PB2sel       mov    #3,state
+             jmp    WAKEUP
+WAKEUP       bic    #CPUOFF ,0(SP)        ; Exit LMP0
+             bic.b  #0xFF,PBsArrIntPend  
+             reti
+;----------------------------------------------------------------------------------------------
+;            Timer based Delay function
+;----------------------------------------------------------------------------------------------                     
+poll_delay   pop   R4        ; save return address
+             pop   R5        ; get delay value
+             
+L            dec.w   R5      ;function body begin                 
+             jnz     L       ;function body end
+             
+             push.w  R4
+             ret
+             
+;----------------------------------------------------------------------------------------------
+;            ADC Routines
+;----------------------------------------------------------------------------------------------
+ADC_Start    bis.w #ADC_SC+ENC, ADC_CTL0  ;start conversion and enc=1 for locking modification
+             bis.w #CPUOFF+GIE, SR        ;go to sleep
+             ret
+;----------------------------------------------------------------------------------------------
+;            ADC ISR
+;---------------------------------------------------------------------------------------------- 
+ADC_ISR      bic.w  #CPUOFF, 0(SP)        ;wakeup
+             bic.w  #0x08, &ADC10IFG      ;reset ifg (we get the interrupt)
+             reti
+;----------------------------------------------------------------------------------------------
+             ENDMOD
+             END
+
+
+ 
