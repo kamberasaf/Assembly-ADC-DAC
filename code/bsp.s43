@@ -1,0 +1,99 @@
+;*****************************************************************************
+; File: bsp.s43 - Board Support Package for ADC/DAC Lab
+; Authors: Asaf Kamber, Aviv Primor
+; Course: Introduction to Computers - Lab 6
+; Description: Hardware configuration for MSP430 microcontroller including
+;              GPIO, ADC, and timer setup for analog applications.
+;*****************************************************************************
+#include  "bsp.h"
+             MODULE BSP
+             PUBLIC GPIOconfig,TIMERconfig,ADCconfig,ADCLabconfig
+             PUBLIC Stop_Timer
+             EXTERN StartTimer,StopTimer,EnableTAIFG,DisableTAIFG,ClearTAIFG
+             EXTERN main,PBs_handler,TimerA_ISR,Garbage,Task3state
+            
+             RSEG   CODE                    
+;-----------------------------------------------------------------------------  
+; Function: GPIOconfig
+; Description: Configures GPIO ports for push buttons, LCD interface, and ADC input
+; Inputs: None
+; Outputs: None
+;-----------------------------------------------------------------------------
+GPIOconfig   mov.w   #WDTPW+WDTHOLD,&WDTCTL   ; Hold watchdog timer
+             
+             ; PushButtons Setup
+             bic.b   #0xF3,PBsArrPortSel     ; Clear P1.0, P1.1, P1.4-P1.7 selection bits for GPIO
+             bis.b   #0x0C,PBsArrPortSel     ; Set P1.2-P1.3 selection bits (P1.3 as ADC, P1.2 as PWM)
+             bis.b   #0x0C,PBsArrPortDir     ; Set P1.2-P1.3 as outputs                               
+             bis.b   #0x03,PBsArrIntEdgeSel  ; Set P1.0-P1.1 for rising edge (pull-up)
+             bic.b   #0x10,PBsArrIntEdgeSel  ; Set P1.4 for falling edge (pull-down)
+             bis.b   #0x17,PBsArrIntEn       ; Enable interrupts for P1.0, P1.1, P1.2, P1.4
+             bic.b   #0x13,PBsArrIntPend     ; Clear pending interrupts
+             
+             ; LCD Configuration
+             bic.b #0xE0, LCDCMDSEL          ; Set LCD command lines (P1.5-P1.7) to GPIO mode
+             bis.b #0xE0, LCDCMDDIR          ; Set LCD command lines as outputs
+             bic.b #0xFF, LCDDataSEL         ; Set LCD data lines (P2.0-P2.7) to GPIO mode
+             bis.b #0xFF, LCDDataDIR         ; Set LCD data lines as outputs
+             
+             ret
+
+;------------------------------------------------------------------------------------- 
+; Function: TIMERconfig
+; Description: Configures Timer A1 for PWM generation with frequency selection
+; Inputs: Task3state - Determines PWM frequency (1: 1kHz, 2: 3kHz)
+; Outputs: None
+;-------------------------------------------------------------------------------------
+TIMERconfig       cmp     #0,Task3state      ; Check if PWM task is active
+                  jeq     Exit               ; If not active, exit
+                  
+                  MOV.W   #TACLR,Timer_A1_CTL  ; Clear Timer A1
+                  MOV.W   #TASSEL_2+MC_1,Timer_A1_CTL  ; SMCLK, Up Mode             
+                  
+                  cmp     #1,Task3state      ; Check if 1kHz frequency selected
+                  jeq     Freq1K             ; Configure for 1kHz
+                  cmp     #2,Task3state      ; Check if 3kHz frequency selected
+                  jeq     Freq3K             ; Configure for 3kHz
+                  
+Freq1K            MOV.W   #1048,Timer_A_CC0_Reg  ; Set period for 1kHz (1048 cycles)
+                  jmp     Exit
+Freq3K            MOV.W   #349,Timer_A_CC0_Reg   ; Set period for 3kHz (349 cycles)
+                  jmp     Exit
+Exit              RET
+
+;-------------------------------------------------------------------------------
+; Function: Stop_Timer
+; Description: Stops Timer A1
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+Stop_Timer        BIC.W #TASSEL_2+MC_3,Timer_A1_CTL  ; Clear clock source and mode bits
+                  RET
+
+;-------------------------------------------------------------------------------------- 
+; Function: ADCconfig
+; Description: Configures ADC for analog input on P1.3 (A3)
+; Inputs: None
+; Outputs: None
+;--------------------------------------------------------------------------------------
+ADCconfig    bic.w #ENC,ADC_CTL0                      ; Disable ADC for configuration
+             mov.w #ADC_Cycles+ADC_ON+ADC_IE,ADC_CTL0 ; Configure for 16 cycle S&H, ADC on, interrupt enabled
+             mov.w #INCH_3, ADC_CTL1                  ; Select input channel 3 (P1.3)
+             ret
+
+;-------------------------------------------------------------------------------------- 
+; Function: ADCLabconfig
+; Description: Alternative ADC configuration for lab environment (not used)
+; Inputs: None
+; Outputs: None
+;--------------------------------------------------------------------------------------
+ADCLabconfig    
+;                bic.w #ENC,ADC_CTL0
+;                mov.w #ADC_Cycles+ADC_ON, ADC_CTL0
+;                mov.w #SHP+CSTARTADD_3, ADC_CTL1
+;                mov.b #INCH_3, ADC_MEM_CTL
+;                mov.w #ADC_MEM3IE, ADC_IE
+;                bis.b #0x08, &P6SEL
+                 ret
+             ENDMOD
+             END

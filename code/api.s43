@@ -1,0 +1,376 @@
+;*****************************************************************************
+; File: api.s43 - API Layer for ADC/DAC Lab
+; Authors: Asaf Kamber, Aviv Primor
+; Course: Introduction to Computers - Lab 6
+; Description: Application Programming Interface implementing high-level tasks
+;              for analog-to-digital conversion, voltage measurement, and PWM output.
+;*****************************************************************************
+#include "bsp.h"  
+;-------------------------------------------------------------------------------
+; Macro Definitions
+;-------------------------------------------------------------------------------
+; DIV16bit: 16-bit binary division implementation
+DIV16bit        MACRO   Divided,Divisor   ; left/right
+                LOCAL   L1,L2,L3          ; for multiple use
+                mov     #17,R9            ; Bit counter (16 bits + 1)
+                clr     R8                ; Quotient register
+                mov.w   Divided,R13       ; Dividend to R13
+                clr     R5                ; Clear high word of dividend
+                mov.w   Divisor,R6        ; Divisor to R6
+
+L3              rla     R8                ; Shift quotient left
+L1              dec     R9                ; Decrement bit counter
+                jz      L2                ; If zero, division is complete
+                rla     R13               ; Shift dividend left
+                rlc     R5                ; Shift dividend through high word
+                cmp     R6,R5             ; Compare high word with divisor
+                jlo     L3                ; If less, skip subtraction
+                sub     R6,R5             ; Subtract divisor
+                setc                      ; Set carry for quotient
+                rlc     R8                ; Shift carry into quotient
+                jmp     L1                ; Continue division
+
+L2              ;mov.w   R8,Quotient      ; Result is in R8
+                ;mov.w   R5,Remainder     ; Remainder is in R5
+                ENDM
+                
+;-------------------------------------------------------------------------------
+; MULT: Binary multiplication by repeated addition
+;-------------------------------------------------------------------------------
+MULT            MACRO     Number,Times
+                LOCAL     L4
+                CLR       R14             ; Clear result register
+                mov       Times, R9       ; Load multiplier
+L4              add       Number, R14     ; Add multiplicand to result    
+                dec       R9              ; Decrement multiplier
+                JNZ       L4              ; Continue until multiplier is zero
+                ENDM
+
+;-------------------------------------------------------------------------------
+; TranASCII: Convert binary value to ASCII digit
+;-------------------------------------------------------------------------------
+TranASCII       MACRO     Origin_Num
+                MOV       Origin_Num, R7  ; Copy number to R7
+                ADD       #0x30, R7       ; Add ASCII offset ('0' = 0x30)
+                MOV       R7, Origin_Num  ; Store ASCII value back
+                ENDM
+
+;-------------------------------------------------------------------------------
+; Module declarations
+;-------------------------------------------------------------------------------
+                MODULE     API
+                PUBLIC     FindExtremas,CalcAvg,FreqOut
+                EXTERN     LCDConfig,LCD_CMD,LCDClear,LCDCursorTo1,margin
+                EXTERN     LCDCursorOff,LCDCursorOn,LCDCursorR,LCDCursorL
+                EXTERN     LCDCursorTo17,LCDPrintChar,Task3state
+                EXTERN     state,poll_delay,counter,VoltDigitCounter,Stop_Timer
+                EXTERN     originFlag,ADC_Start,State2Counter,TIMERconfig,ADCconfig
+
+                RSEG       CODE
+
+;==============================================================================
+; Function: FindExtremas - Task 1
+; Description: Finds and displays the minimum and maximum voltage values from 
+;              continuous ADC readings
+; Inputs: None
+; Outputs: None - displays min/max values on LCD
+;==============================================================================
+FindExtremas      CALL        #LCDClear         ; Clear LCD display
+                  CALL        #LCDCursorTo1     ; Move cursor to first row
+                  CALL        #PrintVmin        ; Display "Vmin=" label
+                  CALL        #LCDCursorTo17    ; Move cursor to second row
+                  CALL        #PrintVmax        ; Display "Vmax=" label
+
+VoltReset         CLR         R10               ; R10 = Max V. (start with Min)
+                  mov         #MaxADC, R11      ; R11 = Min V. (start with Max)
+VoltMeasure       call        #ADC_Start        ; Start ADC conversion and sleep
+                  cmp         R10, ADC_MEM      ; Compare ADC value with max
+                  jn          IsMin             ; If ADC_MEM < max, check min
+                  mov         ADC_MEM, R10      ; If ADC_MEM > max, update max
+
+IsMin             cmp         ADC_MEM, R11      ; Compare ADC value with min
+                  jn          DoneMeasure       ; If ADC_MEM >= min, done
+                  mov         ADC_MEM, R11      ; If ADC_MEM < min, update min
+
+DoneMeasure       cmp         #1, state         ; Check if still in state 1
+                  jne         ExitState1        ; If not, exit task
+                  dec         counter           ; Decrement sampling counter
+                  jnz         VoltMeasure       ; If counter != 0, measure again
+                  mov         #1000, counter    ; Reset counter to 1000
+                  
+                  PUSH        R10               ; Push max value for display
+                  CALL        #HexToDec         ; Convert to decimal
+                  CALL        #LCDCursorTo17    ; Move to second row
+                  CALL        #PrintVoltValue   ; Display max voltage
+                  
+                  PUSH        R11               ; Push min value for display
+                  CALL        #HexToDec         ; Convert to decimal
+                  CALL        #LCDCursorTo1     ; Move to first row
+                  CALL        #PrintVoltValue   ; Display min voltage
+                  JMP         VoltReset         ; Restart measurement cycle
+
+ExitState1        CALL        #LCDClear         ; Clear LCD before exiting
+                  RET                           ; Return to caller
+
+;==============================================================================
+; Function: CalcAvg - Task 2
+; Description: Takes multiple ADC samples, calculates the average, and displays it
+; Inputs: None
+; Outputs: None - displays average value on LCD
+;==============================================================================
+CalcAvg           CALL        #LCDClear         ; Clear LCD display       
+                  CALL        #LCDCursorTo1     ; Move cursor to first row
+                  CALL        #PrintVavg        ; Display "Vavg=" label
+                  NOP
+
+ResetAvg          CMP         #2, state         ; Check if still in state 2
+                  JNZ         ExitFindAverage   ; If not, exit task
+                  CLR         R10               ; R10 = Sampling Sum
+                  CLR         R11               ; R11 = Carry Counter
+
+State2Loop        CALL        #ADC_Start        ; Start ADC conversion
+                  ADD         ADC_MEM, R10      ; Add reading to sum
+                  jc          Carry             ; If carry occurred, increment R11
+DecForLoop        DEC         State2Counter     ; Decrement sample counter
+                  JNZ         State2Loop        ; Continue if more samples needed
+                  MOV         #NumberOfSamples, State2Counter ; Reset counter
+                  
+                  call        #avagcal          ; Calculate average (divide by 2048)
+                  PUSH        R9                ; Prepare average for display
+                  CALL        #HexToDec         ; Convert to decimal
+                  CALL        #LCDCursorTo1     ; Move cursor to first row
+                  CALL        #PrintVoltValue   ; Display average voltage
+                  JMP         ResetAvg          ; Restart average calculation
+
+ExitFindAverage   CALL        #LCDClear         ; Clear LCD before exiting
+                  RET                           ; Return to caller
+
+Carry             inc         R11               ; Increment carry counter
+                  jmp         DecForLoop        ; Continue loop
+
+;==============================================================================
+; Function: FreqOut - Task 3
+; Description: Generates PWM output with frequency based on voltage difference
+;              between consecutive ADC readings
+; Inputs: None
+; Outputs: PWM signal on P1.2
+;==============================================================================
+FreqOut           CALL #ADCconfig               ; Configure ADC for task 3
+State3Loop        CMP  #3,state                 ; Check if still in state 3
+                  JNE  ExitFreqOut              ; If not, exit task
+                  CLR  R10                      ; Clear T0 register
+                  CLR  R11                      ; Clear T1 register
+                  
+                  CALL #ADC_Start               ; First ADC sample
+                  ADD  ADC_MEM, R10             ; Store in T0 (R10)
+                  CALL #ADC_Start               ; Second ADC sample
+                  ADD  ADC_MEM, R11             ; Store in T1 (R11)
+                  
+                  SUB  R10,R11                  ; Calculate T1-T0 -> R11
+                  MULT R11,#280                 ; Scale by factor 280
+                  MULT R11,#2048                ; Scale by factor 2048
+                  
+                  cmp  #3,R11                   ; Is (T1'-T0') > 3?
+                  jge  Freq1K                   ; If yes, use 1KHz frequency
+                  add  #3,R11                   ; Is (T1'-T0') < -3?
+                  jn   Freq3K                   ; If yes, use 3KHz frequency
+                  jmp  State3Loop               ; Otherwise, recalculate
+
+Freq1K            push #524                     ; Push 1KHz duty cycle value (524)
+                  jmp  PWM                      ; Generate PWM
+
+Freq3K            push #58                      ; Push 3KHz duty cycle value (58)
+                  jmp  PWM                      ; Generate PWM
+      
+;-------------------------------------------------------------------------------
+; Function: PWM
+; Description: Implements software PWM generation with specified timing
+; Stack Parameters:
+;   - Duty cycle value
+; Outputs: PWM signal on PWM port
+;-------------------------------------------------------------------------------
+PWM               pop      R4                   ; Get return address
+                  pop      R5                   ; Get duty cycle value
+                  
+                  bis.b    #0x08,PWMPort        ; Set PWM output high
+                  mov      R5,R12               ; Load high time counter
+loop_one          dec      R12                  ; Decrement counter
+                  jnz      loop_one             ; Loop until counter = 0
+           
+                  bic.b    #0x08,PWMPort        ; Set PWM output low
+                  mov      R5,R12               ; Load low time counter
+loop_zero         dec      R12                  ; Decrement counter
+                  jnz      loop_zero            ; Loop until counter = 0
+                  jmp      State3Loop           ; Continue with new calculation
+    
+ExitFreqOut       ret                           ; Return to caller
+
+;===============================================================================
+; LCD Display Support Functions
+;===============================================================================
+;-------------------------------------------------------------------------------
+; Function: PrintVmin
+; Description: Displays "Vmin=[v]" label with space for value
+; Inputs: None
+; Outputs: None - displays label on LCD
+;-------------------------------------------------------------------------------
+PrintVmin         PUSH #'V'                     ; Display "Vmin="
+                  CALL #LCDPrintChar
+                  PUSH #'m'
+                  CALL #LCDPrintChar
+                  PUSH #'i'
+                  CALL #LCDPrintChar
+                  PUSH #'n'
+                  CALL #LCDPrintChar
+                  PUSH #'='
+                  CALL #LCDPrintChar
+                  CALL #LCDCursorR              ; Move cursor right
+                  PUSH #'.'                     ; Place decimal point
+                  CALL #LCDPrintChar
+                  
+                  CALL #LCDCursorR              ; Position for value
+                  CALL #LCDCursorR
+                  
+                  PUSH #'['                     ; Display units "[v]"
+                  CALL #LCDPrintChar
+                  PUSH #'v'
+                  CALL #LCDPrintChar
+                  PUSH #']'
+                  CALL #LCDPrintChar
+                  RET                           ; Return to caller
+
+;-------------------------------------------------------------------------------
+; Function: PrintVmax
+; Description: Displays "Vmax=[v]" label with space for value
+; Inputs: None
+; Outputs: None - displays label on LCD
+;-------------------------------------------------------------------------------
+PrintVmax         PUSH #'V'                     ; Display "Vmax="
+                  CALL #LCDPrintChar
+                  PUSH #'m'
+                  CALL #LCDPrintChar
+                  PUSH #'a'
+                  CALL #LCDPrintChar
+                  PUSH #'x'
+                  CALL #LCDPrintChar
+                  PUSH #'='
+                  CALL #LCDPrintChar
+                  CALL #LCDCursorR              ; Move cursor right
+                  PUSH #'.'                     ; Place decimal point
+                  CALL #LCDPrintChar
+
+                  CALL #LCDCursorR              ; Position for value
+                  CALL #LCDCursorR
+
+                  PUSH #'['                     ; Display units "[v]"
+                  CALL #LCDPrintChar
+                  PUSH #'v'
+                  CALL #LCDPrintChar
+                  PUSH #']'
+                  CALL #LCDPrintChar
+                  RET                           ; Return to caller
+
+;-------------------------------------------------------------------------------
+; Function: PrintVavg
+; Description: Displays "Vavg=[v]" label with space for value
+; Inputs: None
+; Outputs: None - displays label on LCD
+;-------------------------------------------------------------------------------
+PrintVavg         PUSH #'V'                     ; Display "Vavg="
+                  CALL #LCDPrintChar
+                  PUSH #'a'
+                  CALL #LCDPrintChar
+                  PUSH #'v'
+                  CALL #LCDPrintChar
+                  PUSH #'g'
+                  CALL #LCDPrintChar
+                  PUSH #'='
+                  CALL #LCDPrintChar
+                  CALL #LCDCursorR              ; Move cursor right
+                  PUSH #'.'                     ; Place decimal point
+                  CALL #LCDPrintChar
+
+                  CALL #LCDCursorR              ; Position for value
+                  CALL #LCDCursorR
+
+                  PUSH #'['                     ; Display units "[v]"
+                  CALL #LCDPrintChar
+                  PUSH #'v'
+                  CALL #LCDPrintChar
+                  PUSH #']'
+                  CALL #LCDPrintChar
+                  RET                           ; Return to caller
+
+;-------------------------------------------------------------------------------
+; Function: HexToDec
+; Description: Converts 10-bit ADC value to decimal digits (X.YZ format)
+; Stack Parameters:
+;   - ADC value to convert
+; Outputs: Three decimal digits on stack (ones, tenths, hundredths)
+;-------------------------------------------------------------------------------
+HexToDec          DINT                          ; Disable interrupts for atomic operation
+                  POP       R4                  ; Get return address
+                  POP       R5                  ; Get ADC value to convert
+ConvertLoop       DIV16bit  R5, #VoltRatio      ; Divide by 286 (scaling factor)
+                  PUSH      R8                  ; Push quotient digit
+                  MULT      R5,#10              ; Multiply remainder by 10
+                  MOV       R14,R5              ; Move result to R5 for next digit
+                  DEC       VoltDigitCounter    ; Decrement digit counter
+                  JNZ       ConvertLoop         ; Continue if more digits needed
+                  MOV       #3, VoltDigitCounter ; Reset digit counter to 3
+                  PUSH      R4                  ; Push return address
+                  EINT                          ; Enable interrupts
+                  RET                           ; Return to caller
+
+;-------------------------------------------------------------------------------
+; Function: PrintVoltValue
+; Description: Displays a three-digit voltage value (X.YZ format)
+; Stack Parameters:
+;   - Three decimal digits (hundredths, tenths, ones)
+; Outputs: None - displays formatted voltage on LCD
+;-------------------------------------------------------------------------------
+PrintVoltValue    DINT                          ; Disable interrupts for atomic operation
+                  POP R12                       ; Get return address
+                  POP R15                       ; Get hundredths digit
+                  POP R13                       ; Get tenths digit
+                  POP R14                       ; Get ones digit
+                  
+                  TranASCII R15                 ; Convert digits to ASCII
+                  TranASCII R13
+                  TranASCII R14
+                  
+                  CALL #LCDCursorR              ; Position cursor for value
+                  CALL #LCDCursorR
+                  CALL #LCDCursorR
+                  CALL #LCDCursorR
+                  CALL #LCDCursorR
+                  
+                  PUSH R14                      ; Display ones digit
+                  CALL #LCDPrintChar
+                  CALL #LCDCursorR              ; After decimal point
+                  PUSH R13                      ; Display tenths digit
+                  CALL #LCDPrintChar
+                  PUSH R15                      ; Display hundredths digit
+                  CALL #LCDPrintChar
+                  
+                  PUSH R12                      ; Restore return address
+                  EINT                          ; Enable interrupts
+                  RET                           ; Return to caller
+
+;-------------------------------------------------------------------------------
+; Function: avagcal
+; Description: Calculates average by dividing accumulated sum by 2048 (2^11)
+; Inputs: R10 - Sum of ADC readings
+;         R11 - Carry count
+; Outputs: R9 - Average value
+;-------------------------------------------------------------------------------
+avagcal           mov.w #11,R6                  ; Shift count = 11 (divide by 2^11)
+loop              rrc R11                       ; Shift R11:R10 right (divide by 2)
+                  rrc R10                       ; Division using right shift
+                  dec R6                        ; Decrement shift counter
+                  jnz loop                      ; Continue until all shifts done
+                  mov R10,R9                    ; Move result to R9
+                  ret                           ; Return to caller
+
+                  ENDMOD
+                  END

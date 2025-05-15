@@ -1,0 +1,75 @@
+;*****************************************************************************
+; File: main.s43 - Main Program for ADC/DAC Lab
+; Authors: Asaf Kamber, Aviv Primor
+; Course: Introduction to Computers - Lab 6
+; Description: Implements a finite state machine that manages different ADC/DAC
+;              applications for voltage measurement and PWM generation.
+;*****************************************************************************
+#include "bsp.h" 
+                NAME   main
+                PUBLIC state,main,counter,VoltDigitCounter,State2Counter,Task3state
+                EXTERN SysConfig,poll_delay,LCDCursorTo17
+                EXTERN PBs_ISR,ADC_ISR,CalcAvg,FreqOut
+                EXTERN FindExtremas,LCDPrintChar,LCDClear,LCDCursorOn
+
+;==============================================================================
+; Data Section - Memory allocation for variables
+;==============================================================================         
+                 ORG       0x200               ; RAM segment
+state            DW        0                   ; Current state in FSM
+VoltDigitCounter DW        3                   ; Counter for voltage display digits
+counter          DW        1000                ; Sample counter for Task 1
+State2Counter    DW        NumberOfSamples     ; Sample counter for Task 2 (2000)
+Task3state       DW        0                   ; PWM frequency selection for Task 3
+
+;==============================================================================
+; Code Section
+;==============================================================================
+                 RSEG      CSTACK              ; C stack segment
+                 RSEG      CODE                ; Code segment
+;==============================================================================
+; Function: main
+; Description: Program entry point and finite state machine controller
+; Inputs: None
+; Outputs: None
+;==============================================================================
+main             MOV       #SFE(CSTACK),SP     ; Initialize stack pointer
+                 CALL      #SysConfig          ; Initialize system hardware
+
+;==============================================================================
+; Finite State Machine Implementation
+;==============================================================================
+State0           CMP       #0x00,state         ; Check if in state 0 (idle)
+                 JNZ       State1              ; If not, check for state 1
+                 BIS.W     #CPUOFF+GIE,SR      ; Enter low power mode with interrupts
+                 NOP
+
+State1           CMP       #1,state            ; Check if in state 1 (Find Extremes)
+                 JNZ       State2              ; If not, check for state 2
+                 CALL      #FindExtremas       ; Execute Find Extremes task
+                 JMP       State0              ; Return to idle state
+
+State2           CMP       #2,state            ; Check if in state 2 (Calculate Average)
+                 JNZ       State3              ; If not, check for state 3
+                 CALL      #CalcAvg            ; Execute Calculate Average task
+                 JMP       State0              ; Return to idle state
+                 
+State3           CMP       #3,state            ; Check if in state 3 (PWM Output)
+                 JNZ       State0              ; If not, return to idle state
+                 CALL      #FreqOut            ; Execute PWM Output task
+                 JMP       State0              ; Return to idle state
+                
+;---------------------------------------------------------------------------------------                  
+; Interrupt Vector Section
+;---------------------------------------------------------------------------------------
+                 COMMON  INTVEC               ; Interrupt Vectors segment
+;---------------------------------------------------------------------------------------
+                 ORG     PORT1_VECTOR         ; PORT1 Interrupt Vector
+                 DW      PBs_ISR              ; Push buttons interrupt handler
+                 
+                 ORG     ADC_VECTOR           ; ADC Interrupt Vector
+                 DW      ADC_ISR              ; ADC interrupt handler
+                 
+                 ORG     RESET_VECTOR         ; MSP430 RESET Vector
+                 DW      main                 ; Program entry point
+                 END

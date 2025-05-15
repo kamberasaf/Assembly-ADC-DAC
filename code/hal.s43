@@ -1,0 +1,199 @@
+;*****************************************************************************
+; File: hal.s43 - Hardware Abstraction Layer for ADC/DAC Lab
+; Authors: Asaf Kamber, Aviv Primor
+; Course: Introduction to Computers - Lab 6
+; Description: Implementation of low-level hardware functions for LCD control,
+;              ADC access, and push button handling.
+;*****************************************************************************
+#include "bsp.h" 
+              MODULE HAL
+              PUBLIC SysConfig,PBs_ISR,poll_delay
+              PUBLIC LCDConfig,LCD_CMD,LCDClear,LCDCursorTo1,LCDCursorTo17
+              PUBLIC LCDCursorOff,LCDCursorOn,LCDCursorR,LCDCursorL,LCDPrintChar
+              PUBLIC LCDClear,ADC_Start,ADC_ISR
+              EXTERN GPIOconfig,ADCconfig,ADCLabconfig
+              EXTERN state,flag
+            
+              RSEG   CODE
+;--------------------------------------------------------------------
+; Function: SysConfig
+; Description: Initializes system hardware and peripherals
+; Inputs: None
+; Outputs: None
+;--------------------------------------------------------------------
+SysConfig     call #GPIOconfig       ; Initialize GPIO pins
+              call #LCDConfig        ; Initialize LCD
+              call #ADCconfig        ; Initialize ADC
+              ;call #ADCLabconfig    ; Initialize ADC for lab (commented out)
+              ret
+
+;------------------------------------------------------------------------------------- 
+; Function: LCDConfig
+; Description: Initializes the LCD module in 8-bit mode
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------------
+;-----------LCD initialization commands
+LCDConfig   bic.b #LCDRS, LCDCMDPort     ; Clear RS (Register Select)
+            bic.b #LCDRW, LCDCMDPort     ; Clear RW (Read/Write)
+            bic.b #LCDE,  LCDCMDPort     ; Clear E (Enable)
+            clr R6                        ; Clear R6 reserved for LCD_CMD
+            push #5250                    ; Delay 15ms (power-up delay)
+            call #poll_delay
+
+;___________First initialization write
+            mov.b #0x3F,  LCDDataPort     ; Data Byte = 0x3F (8-bit mode)
+            call #LCD_Strobe              ; Generate Enable pulse
+            push #1750                     ; Delay 5ms
+            call #poll_delay
+
+;___________Second initialization write
+            mov.b #0x3F,  LCDDataPort     ; Data Byte = 0x3F (8-bit mode)
+            call #LCD_Strobe              ; Generate Enable pulse
+            push #70                       ; Delay 200µs
+            call #poll_delay
+
+;___________Third initialization write
+            mov.b #0x3F,  LCDDataPort     ; Data Byte = 0x3F (8-bit mode)
+            call #LCD_Strobe              ; Generate Enable pulse            
+            push.w #0x3C
+            call #LCD_CMD                 ; Function set: 8-bit, 2 lines, 5x10 dots
+            call #LCDCursorOn             ; Display on, cursor on, blink on
+            call #LCDClear                ; Clear display
+            push.w #0x06
+            call #LCD_CMD                 ; Entry mode: increment, no shift
+            push.w #0x80
+            call #LCD_CMD                 ; Set DDRAM address to 0
+            call #LCDCursorTo1            ; Return to home position
+            call #LCDCursorOff            ; Turn cursor off for better visibility
+            ret
+            
+;-----------LCD Strobe
+; Generates an Enable pulse for the LCD
+;-----------
+LCD_Strobe  bis.b #LCDE, LCDCMDPort      ; Set E=1
+            nop                           ; Short delay
+            nop
+            bic.b #LCDE, LCDCMDPort      ; Set E=0
+            ret
+
+;-----------LCD_CMD - Send a command to the LCD
+; Stack Parameters:
+;   - Command byte to send
+; Outputs: None
+;-----------
+LCD_CMD     pop R7                        ; Save return address
+            pop R6                        ; Pop command to R6
+            push #1750                  
+            call #poll_delay              ; Delay 5ms
+            mov.b R6, LCDDataPort         ; Move command to data port
+            call #LCD_Strobe              ; Generate Enable pulse
+            push.w R7                     ; Push back return address
+            ret
+
+;-----------LCD DRIVER COMMANDS - Standard LCD commands
+;-----------
+LCDClear      push #0x01                  ; Clear display command
+              call #LCD_CMD
+              ret
+LCDCursorTo1  push #0x02                  ; Return home command
+              call #LCD_CMD
+              ret
+LCDCursorTo17 push.w #0xC0                ; Move to second row command
+              call #LCD_CMD
+              ret
+LCDCursorOff  push.w #0x0C                ; Display on, cursor off command
+              call #LCD_CMD
+              ret
+LCDCursorOn   push.w #0x0F                ; Display on, cursor on, blink on command
+              call #LCD_CMD
+              ret
+LCDCursorR    push.w #0x14                ; Move cursor right command
+              call #LCD_CMD
+              ret
+LCDCursorL    push.w #0x10                ; Move cursor left command
+              call #LCD_CMD
+              ret
+              
+;-----------LCDPrintChar - Displays a character on the LCD
+; Stack Parameters:
+;   - ASCII character to display
+; Outputs: None
+;-----------
+LCDPrintChar  pop R8                      ; Save return address
+              pop R9                      ; Get character to display
+              push   #1750              
+              call   #poll_delay          ; Delay 5ms
+              clr.b  LCDDataPort          ; Clear data port
+              bis.b  #LCDRS, LCDCMDPort   ; Set RS=1 (data mode)
+              mov.b  R9, LCDDataPort      ; Send character to data port
+              call   #LCD_Strobe          ; Generate Enable pulse
+              bic.b  #LCDRS, LCDCMDPort   ; Set RS=0 (command mode)
+              push.w R8                   ; Restore return address
+              ret        
+
+;----------------------------------------------------------------------- 
+; Function: PBs_ISR
+; Description: Interrupt service routine for push buttons
+; Inputs: None (reads interrupt flags)
+; Outputs: state - Updated based on button pressed
+;-----------------------------------------------------------------------
+PBs_ISR      push.w #debounceVal          ; Push debounce delay value
+             call   #poll_delay           ; Call delay for debouncing
+             bit.b  #PB0,PBsArrIntPend    ; Check if PB0 is pushed
+             jnz    PB0sel 
+             bit.b  #PB1,PBsArrIntPend    ; Check if PB1 is pushed
+             jnz    PB1sel
+             bit.b  #PB2,PBsArrIntPend    ; Check if PB2 is pushed
+             jnz    PB2sel
+             reti                         ; Return if no button detected
+             
+PB0sel       mov    #1,state              ; Set state to 1 (voltage extremes)
+             jmp    WAKEUP
+PB1sel       mov    #2,state              ; Set state to 2 (average voltage)
+             jmp    WAKEUP
+PB2sel       mov    #3,state              ; Set state to 3 (PWM frequency output)
+             jmp    WAKEUP
+WAKEUP       bic    #CPUOFF ,0(SP)        ; Clear CPUOFF bit in saved SR to exit LPM0
+             bic.b  #0xFF,PBsArrIntPend   ; Clear all interrupt flags
+             reti                         ; Return from interrupt
+
+;----------------------------------------------------------------------------------------------
+; Function: poll_delay
+; Description: Software delay loop with configurable duration
+; Stack Parameters:
+;   - Delay count value
+; Outputs: None
+;----------------------------------------------------------------------------------------------                     
+poll_delay   pop   R4                     ; Save return address
+             pop   R5                     ; Get delay value
+             
+L            dec.w   R5                   ; Decrement delay counter               
+             jnz     L                    ; Loop until counter reaches zero
+             
+             push.w  R4                   ; Restore return address
+             ret
+             
+;----------------------------------------------------------------------------------------------
+; Function: ADC_Start
+; Description: Starts ADC conversion and puts CPU to sleep until complete
+; Inputs: None
+; Outputs: Result in ADC_MEM
+;----------------------------------------------------------------------------------------------
+ADC_Start    bis.w #ADC_SC+ENC, ADC_CTL0  ; Start conversion and enable ADC
+             bis.w #CPUOFF+GIE, SR        ; Enter low power mode with interrupts
+             ret                          ; Return when woken by ADC interrupt
+
+;----------------------------------------------------------------------------------------------
+; Function: ADC_ISR
+; Description: ADC interrupt service routine
+; Inputs: None
+; Outputs: None - wakes CPU from LPM0
+;----------------------------------------------------------------------------------------------
+ADC_ISR      bic.w  #CPUOFF, 0(SP)        ; Clear CPUOFF bit in saved SR to exit LPM0
+             bic.w  #0x08, &ADC10IFG      ; Clear ADC interrupt flag
+             reti                         ; Return from interrupt
+
+;----------------------------------------------------------------------------------------------
+             ENDMOD
+             END

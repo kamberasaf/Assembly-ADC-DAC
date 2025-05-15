@@ -1,0 +1,49 @@
+# MSP430 Assembly Output Files
+*.o
+*.obj
+*.map
+*.d43
+*.r43
+*.a43
+*.lst
+*.hex
+
+# IAR Embedded Workbench Files
+*.dep
+*.ewd
+*.ewp
+*.ewt
+*.eww
+*.dni
+*.dbgdt
+*.pbi
+*.xcl
+*.pbd
+*.pbi.xcl
+*.__ia
+*.wsdt
+*.wspos
+
+# Code Composer Studio Files
+.project
+.ccsproject
+.cproject
+.settings/
+.launches/
+Debug_*
+Release_*
+targetConfigs/
+
+# Build Directories
+Debug/
+Release/
+
+# OS Specific Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary Files
+*.tmp
+*.bak
+*~
